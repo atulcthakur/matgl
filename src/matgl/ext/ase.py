@@ -20,10 +20,13 @@ from ase.constraints import ExpCellFilter
 from ase.filters import FrechetCellFilter
 from ase.md import Langevin
 from ase.md.andersen import Andersen
+from ase.md.bussi import Bussi
 from ase.md.npt import NPT
 from ase.md.nptberendsen import Inhomogeneous_NPTBerendsen, NPTBerendsen
 from ase.md.nvtberendsen import NVTBerendsen
+from ase.md.velocitydistribution import MaxwellBoltzmannDistribution
 from ase.md.verlet import VelocityVerlet
+from ase.stress import full_3x3_to_voigt_6_stress
 from pymatgen.core.structure import Molecule, Structure
 from pymatgen.io.ase import AseAtomsAdaptor
 from pymatgen.optimization.neighbors import find_points_in_spheres
@@ -131,6 +134,7 @@ class PESCalculator(Calculator):
         potential: Potential,
         state_attr: torch.Tensor | None = None,
         stress_weight: float = 1.0,
+        use_voigt: bool = False,
         **kwargs,
     ):
         """
@@ -141,6 +145,7 @@ class PESCalculator(Calculator):
             state_attr (tensor): State attribute
             compute_stress (bool): whether to calculate the stress
             stress_weight (float): conversion factor from GPa to eV/A^3, if it is set to 1.0, the unit is in GPa
+            use_voigt (bool): whether the voigt notation is used for stress output
             **kwargs: Kwargs pass through to super().__init__().
         """
         super().__init__(**kwargs)
@@ -152,6 +157,7 @@ class PESCalculator(Calculator):
         self.state_attr = state_attr
         self.element_types = potential.model.element_types  # type: ignore
         self.cutoff = potential.model.cutoff
+        self.use_voigt = use_voigt
 
     def calculate(
         self,
@@ -184,7 +190,12 @@ class PESCalculator(Calculator):
             forces=calc_result[1].detach().cpu().numpy(),
         )
         if self.compute_stress:
-            self.results.update(stress=calc_result[2].detach().cpu().numpy() * self.stress_weight)
+            stresses_np = (
+                full_3x3_to_voigt_6_stress(calc_result[2].detach().cpu().numpy())
+                if self.use_voigt
+                else calc_result[2].detach().cpu().numpy()
+            )
+            self.results.update(stress=stresses_np * self.stress_weight)
         if self.compute_hessian:
             self.results.update(hessian=calc_result[3].detach().cpu().numpy())
         if self.compute_magmom:
@@ -377,7 +388,7 @@ class MolecularDynamics:
         state_attr: torch.Tensor | None = None,
         stress_weight: float = 1 / 160.21766208,
         ensemble: Literal[
-            "nve", "nvt", "nvt_langevin", "nvt_andersen", "npt", "npt_berendsen", "npt_nose_hoover"
+            "nve", "nvt", "nvt_langevin", "nvt_andersen", "nvt_bussi", "npt", "npt_berendsen", "npt_nose_hoover"
         ] = "nvt",
         temperature: int = 300,
         timestep: float = 1.0,
@@ -405,8 +416,8 @@ class MolecularDynamics:
             stress of the atoms
             state_attr (torch.Tensor): State attr.
             stress_weight (float): conversion factor from GPa to eV/A^3
-            ensemble (str): choose from "nve", "nvt", "nvt_langevin", "nvt_andersen", "npt",
-            "npt_berendsen", "npt_nose_hoover"
+            ensemble (str): choose from "nve", "nvt", "nvt_langevin", "nvt_andersen", "nvt_bussi",
+            "npt", "npt_berendsen", "npt_nose_hoover"
             temperature (float): temperature for MD simulation, in K
             timestep (float): time step in fs
             pressure (float): pressure in eV/A^3
@@ -488,6 +499,20 @@ class MolecularDynamics:
                 append_trajectory=append_trajectory,
             )
 
+        elif ensemble.lower() == "nvt_bussi":
+            if np.isclose(self.atoms.get_kinetic_energy(), 0.0, rtol=0, atol=1e-12):
+                MaxwellBoltzmannDistribution(self.atoms, temperature_K=temperature)
+            self.dyn = Bussi(
+                self.atoms,
+                timestep * units.fs,
+                temperature_K=temperature,
+                taut=taut,
+                trajectory=trajectory,
+                logfile=logfile,
+                loginterval=loginterval,
+                append_trajectory=append_trajectory,
+            )
+
         elif ensemble.lower() == "npt":
             """
             NPT ensemble default to Inhomogeneous_NPTBerendsen thermo/barostat
@@ -506,8 +531,7 @@ class MolecularDynamics:
                 trajectory=trajectory,
                 logfile=logfile,
                 loginterval=loginterval,
-                # append_trajectory=append_trajectory,
-                # this option is not supported in ASE at this point (I have sent merge request there)
+                append_trajectory=append_trajectory,
             )
 
         elif ensemble.lower() == "npt_berendsen":
