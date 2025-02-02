@@ -10,6 +10,7 @@ import torch
 import torch.nn.functional as F
 import torchmetrics
 from torch import nn
+import wandb
 
 from matgl.apps.pes import Potential
 
@@ -22,6 +23,16 @@ if TYPE_CHECKING:
 class MatglLightningModuleMixin:
     """Mix-in class implementing common functions for training."""
 
+    def on_fit_start(self):
+        """Initialize wandb at the start of training."""
+        if not wandb.run:
+            wandb.init(
+                project="matgl-training",
+                config=self.hparams,
+            )
+        # Optionally, watch the model to track gradients and parameters
+        wandb.watch(self.model, log="all", log_freq=100)
+
     def training_step(self, batch: tuple, batch_idx: int):
         """Training step.
 
@@ -33,6 +44,14 @@ class MatglLightningModuleMixin:
            Total loss.
         """
         results, batch_size = self.step(batch)  # type: ignore
+        
+        current_epoch = self.current_epoch
+        # Log training metrics
+        wandb.log(
+            {f"train_{key}": val.item() for key, val in results.items()},
+            step=self.current_epoch
+        ) 
+
         self.log_dict(  # type: ignore
             {f"train_{key}": val for key, val in results.items()},
             batch_size=batch_size,
@@ -57,6 +76,12 @@ class MatglLightningModuleMixin:
             batch_idx: Batch index.
         """
         results, batch_size = self.step(batch)  # type: ignore
+
+        wandb.log(
+            {f"val_{key}": val.item() for key, val in results.items()},
+            step=self.global_step
+        )
+
         self.log_dict(  # type: ignore
             {f"val_{key}": val for key, val in results.items()},
             batch_size=batch_size,
@@ -75,6 +100,12 @@ class MatglLightningModuleMixin:
             batch_idx: Batch index.
         """
         torch.set_grad_enabled(True)
+
+        wandb.log(
+            {f"test_{key}": val.item() for key, val in results.items()},
+            step=self.global_step
+        )
+
         results, batch_size = self.step(batch)  # type: ignore
         self.log_dict(  # type: ignore
             {f"test_{key}": val for key, val in results.items()},
@@ -119,6 +150,10 @@ class MatglLightningModuleMixin:
             **kwargs: Pass-through.
         """
         super().on_test_model_eval(*args, **kwargs)
+
+    def on_fit_end(self):
+        """Finish wandb logging at the end of training."""
+        wandb.finish()
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
         """
@@ -495,6 +530,8 @@ class PotentialLightningModule(MatglLightningModuleMixin, pl.LightningModule):
         m_rmse = torch.zeros(1)
 
         total_loss = self.energy_weight * e_loss + self.force_weight * f_loss
+
+        #print(valid_labels[2].shape, valid_preds[2].shape)
 
         if self.model.calc_stresses:
             s_loss = loss(valid_labels[2], valid_preds[2], **self.loss_params)
