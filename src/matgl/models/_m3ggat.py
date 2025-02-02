@@ -1,6 +1,4 @@
 """
-Production‐ready implementation of two M3GNet variants:
-
 1. M3GNetWithAttention – a version where a single-head attention mechanism is used for node updates.
 2. OriginalM3GNet – the original architecture (without attention).
 
